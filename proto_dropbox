@@ -1,0 +1,444 @@
+#!/usr/bin/python
+
+import os
+import json
+import sys
+import time
+import datetime
+import argparse
+import tempfile
+import shutil
+from dateutil import tz
+from dropbox import client, rest, session
+
+def ask(question, default = None):
+    """Ask the user the question, return the user's answer.
+
+    If default is set, tell the user the default answer, and take an empty
+    answer to mean choosing the default.
+
+    """
+    if default:
+        question += " (default: " + default + "): "
+    answer = raw_input(question)
+    if answer != "":
+        return answer
+    else:
+        return default
+
+def initialize(reset = False):
+    """Return a DropboxClient and a dict of options for this program to use.
+
+    If the program has already been configured, just load the data from
+    .proto_dropbox_account. If not, interact with the user to link with a dropbox
+    account. If reset is True, then prompt the user the re-enter all the
+    information. Return a pair (dbclient, acct_info), where dbclient is a
+    DropboxClient, and acct_info is a dict with these fields:
+
+
+    APP_KEY          : used to connect to Dropbox
+    APP_SECRET
+    ACCESS_KEY
+    ACCESS_SECRET
+    
+    DROPBOX_DIRECTORY: the local directory to be synced with Dropbox
+    DROPBOX_BASE: the Dropbox directory to be synced (can be "" or "/" to sync all)
+
+
+    """
+
+    necessary_fields = ['APP_KEY', 'APP_SECRET', 'DROPBOX_DIRECTORY', 'DROPBOX_BASE']
+    acct_info = {}
+    try:
+        with open(os.path.expanduser("~/.proto_dropbox_account"), 'rb') as f:
+            acct_info = json.load(f)
+    except IOError:
+        reset = True
+    
+    if reset or any(field not in acct_info for field in necessary_fields):
+        print "It's time to configure proto_dropbox!"
+        print
+
+        while True:
+            direc = ask("Where do you want your Dropbox directory?",
+                        acct_info.get('DROPBOX_DIRECTORY', "~/Dropbox"))
+            direc = os.path.abspath(os.path.expanduser(direc))
+            if os.path.isfile(direc):
+                print direc, "is already a file."
+                continue
+            if not os.path.exists(direc):
+                os.makedirs(direc)
+            if os.path.isdir(direc):
+                break
+            print "There's some problem with", direc
+        acct_info['DROPBOX_DIRECTORY'] = direc
+
+        if 'APP_KEY' not in acct_info or 'APP_SECRET' not in acct_info:
+            print """Log into your Dropbox account and go to this website:
+https://www.dropbox.com/developers/apps/create
+
+Make a new Core Dropbox app, and make its permission type "Full Dropbox".
+    """
+
+        acct_info['APP_KEY'] = ask("Enter app key: ", acct_info.get('APP_KEY'))
+        acct_info['APP_SECRET'] = ask('Enter app secret: ', acct_info.get('APP_SECRET'))
+        acct_info['DROPBOX_BASE'] = ask('Enter Dropbox directory to sync: ',
+                                        acct_info.get('DROPBOX_BASE', "/"))
+        with open(os.path.expanduser("~/.proto_dropbox_account"), 'wb') as f:
+            json.dump(acct_info, f)
+
+        
+
+    try:
+        sess = session.DropboxSession(acct_info['APP_KEY'],
+                                      acct_info['APP_SECRET'], 'dropbox')
+        if ('ACCESS_KEY' not in acct_info) or \
+               ('ACCESS_SECRET' not in acct_info):
+            # need to get permission for app to use Dropbox account
+            request_token = sess.obtain_request_token()
+            url = sess.build_authorize_url(request_token)
+            print
+            print url
+            print
+            print "Please visit this website and press the 'Allow' button, then hit 'Enter' here."
+            raw_input()
+
+            access_token = sess.obtain_access_token(request_token)
+            acct_info['ACCESS_KEY'] = access_token.key
+            acct_info['ACCESS_SECRET'] = access_token.secret
+
+            # save configuration info
+            with open(os.path.expanduser("~/.proto_dropbox_account"), 'wb') as f:
+                json.dump(acct_info, f)
+        else:
+            sess.set_token(acct_info['ACCESS_KEY'],
+                           acct_info['ACCESS_SECRET'])
+
+        return client.DropboxClient(sess), acct_info
+    except rest.ErrorResponse as e:
+        sys.stderr.write("Couldn't link with a Dropbox account. Try again, "
+                         "and use --delink option if problems persist.\n")
+
+
+def get_mtime(filename):
+    """Returns the last modified time of filename."""
+    return os.stat(filename).st_mtime
+
+# CHANGE: deal with failures in upload and download (for instance, if file has been deleted by time
+# we reach it)
+
+def download(client, source, dest):
+    """Download a file from source to a full path dest.
+
+    Return a tuple to be added to the local metadata database.
+
+    """
+
+    with tempfile.NamedTemporaryFile() as f:
+        data, response = client.get_file_and_metadata(source)
+        f.write(data.read())
+        f.flush()
+        shutil.copy(f.name, dest)
+    #CHANGE: clean up code
+    file_time = datetime.datetime.strptime(response['client_mtime'][:-6], "%a, %d %b %Y %H:%M:%S")
+    offset = int(response['client_mtime'][-5:])
+    delta = datetime.timedelta(hours = offset / 100)
+    file_time -= delta
+    file_time = file_time.replace(tzinfo = tz.tzutc())
+    local_file_time = file_time.astimezone(tz.tzlocal())
+    os.utime(dest, (time.time(), time.mktime(local_file_time.timetuple())))
+    print "Downloaded {} to {}.".format(source, dest)
+    return (os.path.basename(dest),
+            {'path': dest,
+             'rev': response['rev'],
+             'is_dir': False,
+             'mtime': get_mtime(dest)})
+
+def upload(client, source, dest, rev=None):
+    """Upload a file from a full path source to dest and returns a new dict of local info.
+
+    If rev does not match what's on the Dropbox server, do not overwrite.
+    Instead, let Dropbox assign a new name to the file. Then change the local
+    file name to this and download the newer version of the file. Return a dict
+    with the new metadata of the local files.
+
+    """
+    with open(source) as f:
+        response = client.put_file(dest, f, parent_rev = rev)
+    print "Uploaded {} to {}".format(source, response['path'])
+    if response['path'].lower() == dest.lower():
+        return {os.path.basename(source): 
+                {'path': source,
+                 'rev': response['rev'],
+                 'is_dir': False,
+                 'mtime': get_mtime(source)}
+                }
+    else:
+        # rename local version of file to match dropbox's name
+        move_to = os.path.join(os.path.dirname(source), os.path.basename(response['path']))
+        if os.path.exists(move_to):
+            raise Exception("Dropbox renamed your file to {} because of a conflict, "
+                            "but {} already exists locally! This shouldn't happen.")
+        os.rename(source, move_to)
+        # and download dropbox's version
+        dname, ddata = download(client, dest, source)
+        print "CONFLICT! Renamed {} to {} and replaced original with server version.".format(source, move_to)
+        return {os.path.basename(move_to):
+                {'path': move_to,
+                 'rev': response['rev'],
+                 'is_dir': False,
+                 'mtime': get_mtime(move_to)},
+                dname: ddata}
+    
+
+        
+    
+
+def sync(client, acct_info):
+    """Synchronizes the dropbox directory and the dropbox account."""
+
+    # In each directory within the dropbox directory is a file called
+    # .proto_dropbox. It holds a json-encoded dictionary containing
+    # fields 'hash' and 'contents'. Under 'contents' is a dict of dicts,
+    # indexed by filename, each of which contains fields:
+    #
+    # rev, path, mtime, is_dir
+    #
+    # is_dir is exactly the Dropbox metadata.
+    # When is_dir is False, rev is the Dropbox metadata. Otherwise, it's the Dropbox hash
+    #    for the directory.
+    # path is full local path of the file.
+    # mtime is the last modified time on the local filesystem at the
+    #    time of synchronization. Changes are detected based on this.
+    join = os.path.join
+    BASE = acct_info['DROPBOX_BASE']
+    last_sync = None
+    new_sync = None
+    
+    for dirpath, dirnames, filenames in os.walk(acct_info['DROPBOX_DIRECTORY']):
+        try:
+            #CHANGE: in this and other sections, there ought to be proper protection
+            # against C-c
+            d = os.path.relpath(dirpath, acct_info['DROPBOX_DIRECTORY'])
+            if d == ".":
+                d = ""
+            try:
+                with open(join(dirpath, ".proto_dropbox"), "rb") as f:
+                    last_sync = json.load(f)
+            except (IOError, ValueError):
+                last_sync = {'hash': None, 'contents': {}}
+
+            new_db = client.metadata(join(BASE, d))
+
+            new_sync = {'hash': new_db['hash'], 'contents': {}}
+            new_db_contents = {} #make dict to easily search metadata
+            for entry in new_db['contents']:
+                new_db_contents[os.path.basename(entry['path'])] = entry
+
+
+            for filename in filenames:
+                if filename == '.proto_dropbox':
+                    continue
+                full_filename = join(dirpath, filename)
+
+                if filename not in last_sync['contents']:
+                    #file did not exist at last sync
+                    new_sync['contents'].update(
+                        upload(client, full_filename, join(BASE, d, filename)))
+                    if filename in new_db_contents:
+                        del new_db_contents[filename]
+
+                elif last_sync['contents'][filename]['mtime'] != get_mtime(full_filename):
+                    #file has changed locally
+                    new_sync['contents'].update(
+                        upload(client, full_filename, join(BASE, d, filename),
+                               last_sync['contents'][filename]['rev']))
+                    del last_sync['contents'][filename]
+                    if filename in new_db_contents:
+                        del new_db_contents[filename]
+
+                elif filename not in new_db_contents:
+                    #file is unchanged locally, does not exist on dropbox
+                    os.remove(full_filename)
+                    print "{} deleted.".format(full_filename)
+                    del last_sync['contents'][filename]
+
+                elif new_db_contents[filename]['rev'] != last_sync['contents'][filename]['rev']:
+                    # file unchanged locally and changed on dropbox
+                    a, b = download(client, join(BASE, d, filename), full_filename)
+                    new_sync['contents'][a] = b
+                    del new_db_contents[filename]
+                    del last_sync['contents'][filename]
+
+                else:
+                    # file did not change anywhere
+                    new_sync['contents'][filename] = last_sync['contents'].pop(filename)
+                    del new_db_contents[filename]
+                
+                ## if filename not in new_db_contents:
+                ##     # file exists only locally
+                ##     if (filename in last_sync['contents'] and
+                ##             last_sync['contents'][filename]['mtime'] == get_mtime(full_filename)):
+                ##         # file unchanged locally, used to be on dropbox
+                ##         os.remove(full_filename)
+                ##         print "{} deleted.".format(full_filename)
+                ##     else:
+                ##         # file is new or has changed
+                ##         new_sync['contents'].update(upload(client, full_filename,
+                ##                                join(BASE, d, filename), None))
+                ##     if filename in last_sync['contents']:
+                ##         del last_sync['contents'][filename]
+
+                ## elif (filename in last_sync['contents'] and 
+                ##      last_sync['contents'][filename]['mtime'] != get_mtime(full_filename)):
+                ##     #file changed locally
+                ##     new_sync['contents'].update(upload(client, full_filename, join(BASE, d, filename),
+                ##            last_sync['contents'][filename]['rev']))
+                ##     del new_db_contents[filename]
+                ##     del last_sync['contents'][filename]
+
+                # handle another case: file is here and on dropbox but is not in last_sync
+
+
+            # now add directories present locally but not on dropbox
+            for filename in list(dirnames):
+                full_filename = join(dirpath, filename)
+                if filename not in new_db_contents:
+                    # directory exists only locally
+                    if filename in last_sync['contents']:
+                        # directory used to exist on Dropbox
+                        if not last_sync['contents'][filename]['is_dir']:
+                            raise Exception("{} IS A DIRECTORY THAT USED TO BE A FILE!!!!!"
+                                            .format(full_filename))
+                        else:
+                            print "DIRECTORY {} EXISTS LOCALLY, NOT ON DROPBOX".format(full_filename)
+                            print "proto_dropbox does not delete directories."
+                            print "If you run proto_dropbox again, the directory will be reuploaded"
+                            print
+                            del last_sync['contents'][filename]
+                            dirnames.remove(filename)
+                    else:
+                        # directory exists locally, needs to created on Dropbox
+                        client.file_create_folder(join(BASE, d, filename))
+                        print "Created Dropbox directory {}".format(join(BASE, d, filename))
+                        new_sync['contents'][filename] = {'path': full_filename,
+                                                          'rev': None,
+                                                          'is_dir': True,
+                                                          'mtime': None}
+                else:
+                    # directory exists here and on dropbox
+                    new_sync['contents'][filename] = {'path': full_filename,
+                                                      'rev': None,
+                                                      'is_dir': True,
+                                                      'mtime': None}
+                    del new_db_contents[filename]
+                    if filename in last_sync['contents']:
+                        del last_sync['contents'][filename]
+                        
+            # now delete files from dropbox if they were deleted locally
+            ## for filename, finfo in dict(last_sync['contents']).iteritems():
+            ##     if filename in new_db_contents:
+                    
+            ##         and
+            ##         new_db_contents[filename]['rev'] == finfo['rev']):
+            ##         # file not present locally, but is unchanged since last sync on dropbox
+            ##         client.file_delete(os.path.join(BASE, d, filename))
+            ##         print "Deleted {} on Dropbox.".format(os.path.join(BASE, d, filename))
+            ##         del new_db_contents[filename]
+            ##         del last_sync['contents'][filename]
+
+
+            # process files present on dropbox but not locally
+            for filename, finfo in dict(new_db_contents).iteritems():
+                full_filename = join(dirpath, filename)
+                if not finfo['is_dir']:
+                    if (filename in last_sync['contents'] and
+                      last_sync['contents'][filename]['rev'] == new_db_contents[filename]['rev']):
+                        # file used to exist locally, unchanged on dropbox
+                        client.file_delete(join(BASE, d, filename))
+                        print "Deleted {} on Dropbox.".format(join(BASE, d, filename))
+                        del new_db_contents[filename]
+                    else:
+                        # file not present locally, new or different version on dropbox
+                        a, b = download(client, join(BASE, d, filename), full_filename)
+                        new_sync['contents'][a] = b
+                        del new_db_contents[filename]
+                    if filename in last_sync['contents']:
+                        del last_sync['contents'][filename]
+
+                else:
+                    if filename not in dirnames:
+                        # directory exists on dropbox but not locally
+                        if filename in last_sync['contents']:
+                            # directory previously existed locally
+                            print "DIRECTORY {} EXISTS ON DROPBOX, USED TO EXIST LOCALLY."\
+                                  .format(full_filename)
+                            print "proto_dropbox does not delete directories on Dropbox."
+                            print "If you run proto_dropbox again, the directory will be redownloaded."
+                            print
+                            del last_sync['contents'][filename]
+                        else:
+                            # directory needs to be downloaded
+                            os.mkdir(full_filename)
+                            print "Created local directory {}".format(full_filename)
+                            new_sync['contents'][filename] = {'path': full_filename,
+                                                            'rev': None,
+                                                            'is_dir': True,
+                                                            'mtime': None}
+                            dirnames.append(filename)
+                    del new_db_contents[filename]
+
+            if len(new_db_contents) > 0:
+                print "WARNING: some file records on Dropbox not processed."
+                print "new_db_contents: {}".format(str(new_db_contents))
+            while len(last_sync['contents']) > 0:
+                filename, finfo = last_sync['contents'].popitem()
+                print "{} is no longer present locally or on Dropbox.".format(finfo['path'])
+        finally:
+            if last_sync and new_sync:
+                if len(last_sync['contents']) != 0:
+                    print "last_sync['contents'] not empty--its contents are:"
+                    print last_sync
+                    new_sync['contents'].update({key: item for key, item in last_sync['contents'].iteritems()
+                                                 if key not in new_sync['contents']})
+                with open(join(dirpath, ".proto_dropbox"), "wb") as f:
+                    json.dump(new_sync, f)
+        
+
+
+        
+        
+        
+            
+
+#CHANGE: make it so that you can specify a specific directory to start in
+parser = argparse.ArgumentParser(description = "A command line interface to your Dropbox account")
+parser.add_argument("--relink", action='store_true',
+                    help="prompt to change Dropbox account linking information")
+parser.add_argument("--delink", action='store_true',
+                    help="delete Dropbox account linking information")
+args = parser.parse_args()
+
+if args.relink:
+    reset = True
+else:
+    reset = False
+
+if args.delink:
+    config_file = os.path.expanduser("~/.proto_dropbox_account")
+    if os.path.isfile(config_file):
+        os.remove(config_file)
+
+client, acct_info = initialize(reset)
+print "Connected..."
+try:
+    client.metadata(acct_info['DROPBOX_BASE'])
+except rest.ErrorResponse as e:
+    if e.status == 404:
+        print "Dropbox base directory {} does not exist!".format(acct_info['DROPBOX_BASE'])
+        print "Run again with relink option and change it."
+    raise
+sync(client, acct_info)
+
+
+
