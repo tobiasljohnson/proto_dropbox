@@ -191,11 +191,32 @@ def upload(client, source, dest, rev=None):
                 dname: ddata}
     
 
-        
-    
+def load_skips(dir, include_optionals):
+    """Load the list of files to ignore.
 
-def sync(client, acct_info):
-    """Synchronizes the dropbox directory and the dropbox account."""
+    dir is the full directory name to consider. Load the '.proto_dropbox_ignore' file,
+    and if include_optionals is False, the '.proto_dropbox_optional' file.  Return the list
+    of filenames to be skipped.
+
+    """
+    try:
+        with open(os.path.join(dir, ".proto_dropbox_ignore")) as f:
+            ignores = [line.rstrip() for line in f]
+    except IOError:
+        ignores = []
+    if not include_optionals:
+        try:
+            with open(os.path.join(dir, ".proto_dropbox_optional")) as f:
+                optionals = [line.rstrip() for line in f]
+        except IOError:
+            optionals = []
+        return ignores + optionals
+    else:
+        return ignores
+
+
+def sync(client, acct_info, include_optionals = False):
+    """Synchronize the dropbox directory and the dropbox account."""
 
     # In each directory within the dropbox directory is a file called
     # .proto_dropbox. It holds a json-encoded dictionary containing
@@ -234,10 +255,18 @@ def sync(client, acct_info):
             new_db_contents = {} #make dict to easily search metadata
             for entry in new_db['contents']:
                 new_db_contents[os.path.basename(entry['path'])] = entry
+            skips = load_skips(dirpath, include_optionals)
 
 
             for filename in filenames:
-                if filename == '.proto_dropbox':
+                if filename == ".proto_dropbox" or filename == ".proto_dropbox_ignore" \
+                       or filename == ".proto_dropbox_optional":
+                    continue
+                if filename in skips:
+                    if filename in new_db_contents:
+                        del new_db_contents[filename]
+                    if filename in last_sync['contents']:
+                        del last_sync['contents'][filename]
                     continue
                 full_filename = join(dirpath, filename)
 
@@ -302,6 +331,13 @@ def sync(client, acct_info):
 
             # now add directories present locally but not on dropbox
             for filename in list(dirnames):
+                if filename in skips:
+                    dirnames.remove(filename)
+                    if filename in new_db_contents:
+                        del new_db_contents[filename]
+                    if filename in last_sync['contents']:
+                        del last_sync['contents'][filename]
+                    continue
                 full_filename = join(dirpath, filename)
                 if filename not in new_db_contents:
                     # directory exists only locally
@@ -350,6 +386,11 @@ def sync(client, acct_info):
 
             # process files present on dropbox but not locally
             for filename, finfo in dict(new_db_contents).iteritems():
+                if filename in skips:
+                    del new_db_contents[filename]
+                    if filename in last_sync['contents']:
+                        del last_sync['contents'][filename]
+                    continue
                 full_filename = join(dirpath, filename)
                 if not finfo['is_dir']:
                     if (filename in last_sync['contents'] and
@@ -410,24 +451,30 @@ def sync(client, acct_info):
         
         
             
-
 #CHANGE: make it so that you can specify a specific directory to start in
 parser = argparse.ArgumentParser(description = "A command line interface to your Dropbox account")
 parser.add_argument("--relink", action='store_true',
                     help="prompt to change Dropbox account linking information")
 parser.add_argument("--delink", action='store_true',
                     help="delete Dropbox account linking information")
+parser.add_argument("--all", "-a", action='store_true',
+                    help="include files marked in '.proto_dropbox_optional'")
 args = parser.parse_args()
+
+if args.delink:
+    config_file = os.path.expanduser("~/.proto_dropbox_account")
+    if os.path.isfile(config_file):
+        os.remove(config_file)
+        print "Successfully delinked proto_dropbox from your account."
+    else:
+        print "proto_dropbox wasn't linked yet."
+    exit()
 
 if args.relink:
     reset = True
 else:
     reset = False
 
-if args.delink:
-    config_file = os.path.expanduser("~/.proto_dropbox_account")
-    if os.path.isfile(config_file):
-        os.remove(config_file)
 
 client, acct_info = initialize(reset)
 print "Connected..."
@@ -438,7 +485,7 @@ except rest.ErrorResponse as e:
         print "Dropbox base directory {} does not exist!".format(acct_info['DROPBOX_BASE'])
         print "Run again with relink option and change it."
     raise
-sync(client, acct_info)
+sync(client, acct_info, include_optionals=args.all)
 
 
 
