@@ -177,8 +177,9 @@ def upload(client, source, dest, rev=None):
         # rename local version of file to match dropbox's name
         move_to = os.path.join(os.path.dirname(source), os.path.basename(response['path']))
         if os.path.exists(move_to):
-            raise Exception("Dropbox renamed your file to {} because of a conflict, "
-                            "but {} already exists locally! This shouldn't happen.")
+            raise Exception("Dropbox renamed your file {old_name} to {new_name} because of a conflict, "
+                            "but {new_name} already exists locally! This shouldn't happen."
+                            .format(old_name = source, new_name = move_to)
         os.rename(source, move_to)
         # and download dropbox's version
         dname, ddata = download(client, dest, source)
