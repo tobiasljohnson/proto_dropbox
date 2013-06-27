@@ -42,7 +42,7 @@ def initialize(reset = False):
     ACCESS_SECRET
     
     DROPBOX_DIRECTORY: the local directory to be synced with Dropbox
-    DROPBOX_BASE: the Dropbox directory to be synced (can be "" or "/" to sync all)
+    DROPBOX_BASE: the Dropbox directory to be synced (must start with "/"--can be "/" to sync all)
 
 
     """
@@ -84,6 +84,8 @@ Make a new Core Dropbox app, and make its permission type "Full Dropbox".
         acct_info['APP_SECRET'] = ask('Enter app secret: ', acct_info.get('APP_SECRET'))
         acct_info['DROPBOX_BASE'] = ask('Enter Dropbox directory to sync: ',
                                         acct_info.get('DROPBOX_BASE', "/"))
+        if not acct_info['DROPBOX_BASE'].startswith('/'):
+            acct_info['DROPBOX_BASE'] = '/' + acct_info['DROPBOX_BASE']
         with open(os.path.expanduser("~/.proto_dropbox_account"), 'wb') as f:
             json.dump(acct_info, f)
 
@@ -179,7 +181,7 @@ def upload(client, source, dest, rev=None):
         if os.path.exists(move_to):
             raise Exception("Dropbox renamed your file {old_name} to {new_name} because of a conflict, "
                             "but {new_name} already exists locally! This shouldn't happen."
-                            .format(old_name = source, new_name = move_to)
+                            .format(old_name = source, new_name = move_to))
         os.rename(source, move_to)
         # and download dropbox's version
         dname, ddata = download(client, dest, source)
@@ -221,7 +223,7 @@ def sync(client, acct_info, include_optionals = False):
 
     # In each directory within the dropbox directory is a file called
     # .proto_dropbox. It holds a json-encoded dictionary containing
-    # fields 'hash' and 'contents'. Under 'contents' is a dict of dicts,
+    # fields 'path', 'hash' and 'contents'. Under 'contents' is a dict of dicts,
     # indexed by filename, each of which contains fields:
     #
     # rev, path, mtime, is_dir
@@ -247,12 +249,19 @@ def sync(client, acct_info, include_optionals = False):
             try:
                 with open(join(dirpath, ".proto_dropbox"), "rb") as f:
                     last_sync = json.load(f)
+                    if 'path' not in last_sync:
+                        last_sync['path'] = dirpath
+                    elif last_sync['path'] != dirpath: # directory has moved! ignore old data
+                        print "Directory {} has been moved from {}. It will be reuploaded. You'll have to" \
+                              " delete the old directory off of Dropbox by hand." \
+                              .format(dirpath, last_sync['path'])
+                        raise ValueError("Old directory path doesn't match new one")
             except (IOError, ValueError):
-                last_sync = {'hash': None, 'contents': {}}
+                last_sync = {'hash': None, 'contents': {}, 'path': dirpath}
 
             new_db = client.metadata(join(BASE, d))
 
-            new_sync = {'hash': new_db['hash'], 'contents': {}}
+            new_sync = {'hash': new_db['hash'], 'contents': {}, 'path': dirpath}
             new_db_contents = {} #make dict to easily search metadata
             for entry in new_db['contents']:
                 new_db_contents[os.path.basename(entry['path'])] = entry

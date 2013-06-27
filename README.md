@@ -70,4 +70,17 @@ Now, run proto_dropbox and follow its directions.
 Usage
 =====
 
-Typically, you just run the script and it synchronizes.
+Typically, you just run the script and it synchronizes. If you want proto_dropbox
+to completely ignore some files, make a new file called .proto_dropbox_ignore in the
+directory where the file is found. Put the name of each file that you want to
+be ignored in this file, one per line. You can also ignore directories this way;
+proto_dropbox won't enter that directory and will ignore all of its subdirectories
+too.
+
+If you do the exact same thing with a file called .proto_dropbox_optional, proto_dropbox
+will ignore whatever files and directories you list here unless you run it with the -a (long
+form: --all) command. This is useful for speeding up the script: you can tell it to ignore
+directories that are rarely updated.
+
+You can see a few other command line options by running proto_dropbox with the -h or --help 
+option.
