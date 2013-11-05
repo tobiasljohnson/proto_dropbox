@@ -25,7 +25,7 @@ re-upload or re-download it the next time you synchronize.
 
 The script tracks changes locally just by looking at file modification
 times. For your Dropbox account, it tracks the changes the right way,
-usingthe mechanism built into Dropbox. To interface with your Dropbox
+using the mechanism built into Dropbox. To interface with your Dropbox
 account, it uses the Dropbox Core API, so it's safe and works nicely.
 
 Installation
@@ -53,17 +53,17 @@ and mark it as executable (chmod u+x proto_dropbox).
 
 You almost certainly already have Python, but if not, type
 
-sudo apt-get install python2.7
+    sudo apt-get install python2.7
 
 If you don't already have a program called "easy_install",
 install it:
 
-sudo apt-get install python-setuptools
+    sudo apt-get install python-setuptools
 
 Now, run the following two commands:
 
-sudo easy_install dropbox
-sudo easy_install python-dateutil
+    sudo easy_install dropbox
+    sudo easy_install python-dateutil
 
 Now, run proto_dropbox and follow its directions.
 

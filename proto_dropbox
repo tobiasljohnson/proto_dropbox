@@ -8,6 +8,7 @@ import datetime
 import argparse
 import tempfile
 import shutil
+import logging
 from dateutil import tz
 from dropbox import client, rest, session
 
@@ -136,6 +137,8 @@ def download(client, source, dest):
 
     """
 
+    logging.debug("download(client, source={}, dest={})".format(
+        source, dest))
     with tempfile.NamedTemporaryFile() as f:
         data, response = client.get_file_and_metadata(source)
         f.write(data.read())
@@ -165,6 +168,8 @@ def upload(client, source, dest, rev=None):
     with the new metadata of the local files.
 
     """
+    logging.debug("upload(client, source={}, dest={}, rev={})".format(
+        source, dest, rev))
     with open(source) as f:
         response = client.put_file(dest, f, parent_rev = rev)
     print "Uploaded {} to {}".format(source, response['path'])
@@ -246,6 +251,7 @@ def sync(client, acct_info, include_optionals = False):
             d = os.path.relpath(dirpath, acct_info['DROPBOX_DIRECTORY'])
             if d == ".":
                 d = ""
+            new_sync = {'contents': {}, 'path': dirpath}
             try:
                 with open(join(dirpath, ".proto_dropbox"), "rb") as f:
                     last_sync = json.load(f)
@@ -259,9 +265,10 @@ def sync(client, acct_info, include_optionals = False):
             except (IOError, ValueError):
                 last_sync = {'hash': None, 'contents': {}, 'path': dirpath}
 
+            
             new_db = client.metadata(join(BASE, d))
 
-            new_sync = {'hash': new_db['hash'], 'contents': {}, 'path': dirpath}
+            new_sync['hash'] = new_db['hash']
             new_db_contents = {} #make dict to easily search metadata
             for entry in new_db['contents']:
                 new_db_contents[os.path.basename(entry['path'])] = entry
@@ -445,6 +452,9 @@ def sync(client, acct_info, include_optionals = False):
             while len(last_sync['contents']) > 0:
                 filename, finfo = last_sync['contents'].popitem()
                 print "{} is no longer present locally or on Dropbox.".format(finfo['path'])
+        except rest.ErrorResponse as e:
+            print e.message
+            raise
         finally:
             if last_sync and new_sync:
                 if len(last_sync['contents']) != 0:
@@ -458,7 +468,10 @@ def sync(client, acct_info, include_optionals = False):
 
 
         
-        
+logfile = os.path.expanduser("~/.proto_dropbox_log")
+with open(logfile, "wb"):
+    pass #clear log
+logging.basicConfig(filename=logfile, level=logging.DEBUG)        
         
             
 #CHANGE: make it so that you can specify a specific directory to start in
