@@ -223,7 +223,7 @@ def load_skips(dir, include_optionals):
         return ignores
 
 
-def sync(client, acct_info, include_optionals = False):
+def sync(client, acct_info, include_optionals = False, verbose=False):
     """Synchronize the dropbox directory and the dropbox account."""
 
     # In each directory within the dropbox directory is a file called
@@ -266,6 +266,11 @@ def sync(client, acct_info, include_optionals = False):
                 last_sync = {'hash': None, 'contents': {}, 'path': dirpath}
 
             
+            if verbose:
+                if d == "":
+                    print "Now processing root directory..."
+                else:
+                    print "Now processing {}...".format(d)
             new_db = client.metadata(join(BASE, d))
 
             new_sync['hash'] = new_db['hash']
@@ -482,6 +487,8 @@ parser.add_argument("--delink", action='store_true',
                     help="delete Dropbox account linking information")
 parser.add_argument("--all", "-a", action='store_true',
                     help="include files marked in '.proto_dropbox_optional'")
+parser.add_argument("--verbose", "-v", action='store_true',
+                    help="print directory names as they're processed")
 args = parser.parse_args()
 
 if args.delink:
@@ -508,7 +515,7 @@ except rest.ErrorResponse as e:
         print "Dropbox base directory {} does not exist!".format(acct_info['DROPBOX_BASE'])
         print "Run again with relink option and change it."
     raise
-sync(client, acct_info, include_optionals=args.all)
+sync(client, acct_info, include_optionals=args.all, verbose=args.verbose)
 
 
 
